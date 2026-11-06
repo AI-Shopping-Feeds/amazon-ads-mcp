@@ -115,6 +115,7 @@ def test_token_file_is_owner_only(tmp_path: Path) -> None:
     save_token_file(path, {"refresh_token": "Atzr|abc"})
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_redact_hides_tokens_and_secret_keys() -> None:

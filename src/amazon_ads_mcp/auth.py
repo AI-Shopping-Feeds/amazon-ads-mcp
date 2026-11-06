@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from .config import Config
+from .config import Config, make_private_dir
 
 SCOPE = "advertising::campaign_management"
 # Refresh this many seconds before the access token's stated expiry.
@@ -154,8 +154,11 @@ def _safe_json(resp: httpx.Response) -> Any:
 
 
 def save_token_file(path: Path, data: dict[str, Any]) -> None:
-    """Write (or merge into) the token file with owner-only (0600) permissions."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write (or merge into) the token file with owner-only (0600) permissions.
+
+    Folders created for it are owner-only (0700) too.
+    """
+    make_private_dir(path.parent)
     existing: dict[str, Any] = {}
     if path.exists():
         try:

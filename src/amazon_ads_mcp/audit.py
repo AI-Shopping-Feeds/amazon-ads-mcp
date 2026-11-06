@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from .auth import redact
+from .config import make_private_dir
 
 DAY = 86400
+FILE_MODE = 0o600
+
+
+def _open_private(path: Path, mode: str) -> IO[str]:
+    """Open path for writing ('a' or 'w'), creating it owner-only (0600)."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(path, flags, FILE_MODE)
+    return os.fdopen(fd, mode, encoding="utf-8")
 
 
 class AuditLog:
@@ -19,7 +29,8 @@ class AuditLog:
     before-snapshot of the entities it touched, and the write response. Read
     responses and report rows are never written here. Entries older than
     `retention_days` are pruned (see `prune`); 0 keeps them indefinitely.
-    Tokens and secrets are redacted before anything is written.
+    Tokens and secrets are redacted before anything is written. The file and
+    any folders created for it are owner-only.
     """
 
     def __init__(self, path: Path, retention_days: int = 30):
@@ -60,8 +71,8 @@ class AuditLog:
         }
         line = json.dumps(redact(entry), ensure_ascii=False, default=str)
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
+            make_private_dir(self.path.parent)
+            with _open_private(self.path, "a") as f:
                 f.write(line + "\n")
         return audit_id
 
@@ -99,7 +110,7 @@ class AuditLog:
             removed = len(entries) - len(keep)
             if removed:
                 tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-                with tmp.open("w", encoding="utf-8") as f:
+                with _open_private(tmp, "w") as f:
                     for e in keep:
                         f.write(json.dumps(e, ensure_ascii=False, default=str) + "\n")
                 tmp.replace(self.path)

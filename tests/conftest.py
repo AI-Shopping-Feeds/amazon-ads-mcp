@@ -37,6 +37,23 @@ class FakeAuth:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point ~ and the working folder at temp folders.
+
+    The server reads ~/.amazon-ads-mcp/.env and ./.env, and writes its token
+    and audit log under ~/.amazon-ads-mcp, so tests must never see the real ones.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    return home
+
+
+@pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     slept: list[float] = []
     monkeypatch.setattr("amazon_ads_mcp.client.time.sleep", lambda s: slept.append(s))
