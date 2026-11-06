@@ -7,6 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import Context
 
 from .. import safety
+from ..auth import redact
 from ..client import AmazonAdsClient
 from ._common import ListStyleEntity, ids_to_strings, list_style_fetch
 from ._progress import report, run_blocking
@@ -61,7 +62,9 @@ async def _send_chunks(
             )
             results.append(out)
         except Exception as e:
-            failed.append({"from_index": start, "count": len(chunk), "reason": str(e)[:300]})
+            failed.append(
+                {"from_index": start, "count": len(chunk), "reason": redact(str(e))[:300]}
+            )
         done += len(chunk)
         await report(ctx, done, total, f"Sent {done} of {total}")
     return {"sent": total, "batches": results, "failed_batches": failed}

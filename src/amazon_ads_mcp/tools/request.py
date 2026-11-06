@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from .. import safety
-from ..client import AmazonAdsClient
+from ..client import AmazonAdsClient, check_api_path
 
 # POST endpoints that only read: list/query/search calls, recommendations,
 # forecasts, insights and report requests.
@@ -15,17 +15,44 @@ _READ_POST = re.compile(
     r"|/count$|/budget/usage$|^/reporting/reports$|^/adsApi/v1/create/reports$)",
     re.IGNORECASE,
 )
+# A POST to a path with one of these segments changes something, even if the
+# path also matches _READ_POST (e.g. '.../recommendations/apply').
+_ACTION_SEGMENTS = {
+    "accept",
+    "apply",
+    "approve",
+    "archive",
+    "associate",
+    "cancel",
+    "create",
+    "delete",
+    "disassociate",
+    "enable",
+    "pause",
+    "reject",
+    "submit",
+    "update",
+}
+# Report requests read data, though the v1 path says "create".
+_READ_ACTION_PATHS = {"/reporting/reports", "/adsapi/v1/create/reports"}
 _UNSCOPED = ("/v2/profiles", "/managerAccounts")
+
+
+def _is_read_post(bare: str) -> bool:
+    if not _READ_POST.search(bare):
+        return False
+    if bare.lower() in _READ_ACTION_PATHS:
+        return True
+    return not any(segment.lower() in _ACTION_SEGMENTS for segment in bare.split("/"))
 
 
 def _classify(method: str, path: str) -> tuple[str, str, bool, bool]:
     method = method.upper()
     if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
         raise ValueError("method must be GET, POST, PUT, PATCH or DELETE.")
-    if not path.startswith("/") or "://" in path or ".." in path:
-        raise ValueError("path must be relative to the Amazon Ads API host, e.g. '/v2/profiles'.")
+    check_api_path(path)
     bare = path.split("?", 1)[0]
-    is_read = method == "GET" or (method == "POST" and bool(_READ_POST.search(bare)))
+    is_read = method == "GET" or (method == "POST" and _is_read_post(bare))
     scoped = not bare.startswith(_UNSCOPED)
     return method, bare, is_read, scoped
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import gzip
 import json
 import random
 import time
+import zlib
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -21,8 +21,33 @@ MAX_ATTEMPTS = 5
 MAX_BACKOFF = 300.0  # cap on honouring a very long Retry-After
 # Report files are served from Amazon-owned storage; nothing else is fetched.
 DOWNLOAD_HOST_SUFFIXES = (".amazonaws.com", ".amazon.com")
+# Reports are held in memory, so refuse files bigger than this (compressed or not).
+MAX_REPORT_BYTES = 200 * 1024 * 1024
+_CHUNK = 1024 * 1024
 
 logger = get_logger("client")
+
+
+def check_api_path(path: str) -> None:
+    """Refuse paths that could leave the API host or step outside the given endpoint.
+
+    Paths are relative to the regional host and start with '/'. Dot segments
+    (also percent-encoded), backslashes, fragments, whitespace and control
+    characters are rejected.
+    """
+    if not path.startswith("/") or path.startswith("//") or "://" in path:
+        raise ValueError("path must be relative to the Amazon Ads API host, e.g. '/v2/profiles'.")
+    if any(c in path for c in "\\#") or any(ord(c) < 0x21 or ord(c) == 0x7F for c in path):
+        raise ValueError(
+            "path contains characters that aren't allowed (\\, #, spaces or controls)."
+        )
+    bare = unquote(path.split("?", 1)[0])
+    if "\\" in bare or any(segment in (".", "..") for segment in bare.split("/")):
+        raise ValueError("path must not contain '.' or '..' segments or encoded backslashes.")
+
+
+class ReportTooLargeError(ValueError):
+    """A report file is bigger than MAX_REPORT_BYTES."""
 
 
 class AmazonAdsAPIError(Exception):
@@ -121,10 +146,7 @@ class AmazonAdsClient:
             and are not written to the audit log.
         """
         method = method.upper()
-        if not path.startswith("/") or "://" in path:
-            raise ValueError(
-                "path must be relative to the Amazon Ads API host, e.g. '/v2/profiles'."
-            )
+        check_api_path(path)
         profile = self.resolve_profile(profile_id) if scoped else None
         url = f"{self.base_url}{path}"
         is_write = method in WRITE_METHODS and not read_only
@@ -309,27 +331,35 @@ class AmazonAdsClient:
         """Fetch a finished report file and return its rows, kept in memory only.
 
         The URL is a short-lived signed link to Amazon's storage, so no auth
-        headers are sent with it.
+        headers are sent with it. Files over MAX_REPORT_BYTES (compressed or
+        decompressed) are refused rather than read into memory.
         """
-        host = urlparse(url).hostname or ""
-        if urlparse(url).scheme != "https" or not host.endswith(DOWNLOAD_HOST_SUFFIXES):
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if parsed.scheme != "https" or not host.endswith(DOWNLOAD_HOST_SUFFIXES):
             raise ValueError(f"Refusing to download a report from a non-Amazon host: {host!r}")
         last: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
-                resp = httpx.get(url, timeout=max(self.config.timeout, 120.0))
+                with httpx.stream("GET", url, timeout=max(self.config.timeout, 120.0)) as resp:
+                    if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_ATTEMPTS - 1:
+                        self._sleep_backoff(attempt, resp)
+                        continue
+                    if resp.status_code != 200:
+                        head = next(resp.iter_bytes(4096), b"")
+                        raise AmazonAdsAPIError(
+                            resp.status_code, head[:300].decode("utf-8", "replace")
+                        )
+                    raw = _read_capped(resp)
             except httpx.RequestError as e:
                 last = e
                 self._sleep_backoff(attempt)
                 continue
-            if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_ATTEMPTS - 1:
-                self._sleep_backoff(attempt, resp)
-                continue
-            if resp.status_code != 200:
-                raise AmazonAdsAPIError(resp.status_code, resp.text[:300])
-            raw = resp.content
-            if raw[:2] == b"\x1f\x8b":
-                raw = gzip.decompress(raw)
+            # Read raw (not content-decoded) so the size cap holds; unwrap gzip here,
+            # twice at most in case the storage also sent Content-Encoding: gzip.
+            for _ in range(2):
+                if raw[:2] == b"\x1f\x8b":
+                    raw = _gunzip_capped(raw)
             data = json.loads(raw.decode("utf-8")) if raw.strip() else []
             return data if isinstance(data, list) else [data]
         raise AmazonAdsAPIError(0, str(last) if last else "report download failed")
@@ -353,3 +383,42 @@ class AmazonAdsClient:
                 retry_after = 0.0
         base = min(max(retry_after, min(2**attempt, 30)), MAX_BACKOFF)
         time.sleep(base + random.uniform(0, 0.5))
+
+
+def _too_large() -> ReportTooLargeError:
+    return ReportTooLargeError(
+        f"The report is larger than {MAX_REPORT_BYTES // (1024 * 1024)} MB, so it wasn't "
+        "loaded. Request a shorter date range, fewer columns, a coarser group_by or "
+        "time_unit SUMMARY."
+    )
+
+
+def _read_capped(resp: httpx.Response) -> bytes:
+    """Read a streamed response body as sent, refusing anything over MAX_REPORT_BYTES."""
+    declared = resp.headers.get("Content-Length", "")
+    if declared.isdigit() and int(declared) > MAX_REPORT_BYTES:
+        raise _too_large()
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in resp.iter_raw(_CHUNK):
+        size += len(chunk)
+        if size > MAX_REPORT_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _gunzip_capped(raw: bytes) -> bytes:
+    """Decompress gzip data (one or more members), refusing output over MAX_REPORT_BYTES."""
+    out = bytearray()
+    data = raw
+    while data:
+        inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        out += inflater.decompress(data, MAX_REPORT_BYTES + 1 - len(out))
+        if len(out) > MAX_REPORT_BYTES or inflater.unconsumed_tail:
+            raise _too_large()
+        out += inflater.flush()
+        if not inflater.eof:
+            raise ValueError("The report file is incomplete (truncated gzip data).")
+        data = inflater.unused_data.lstrip(b"\x00")
+    return bytes(out)

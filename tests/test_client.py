@@ -7,7 +7,13 @@ import httpx
 import pytest
 import respx
 
-from amazon_ads_mcp.client import AmazonAdsAPIError, AmazonAdsClient
+from amazon_ads_mcp import client as client_module
+from amazon_ads_mcp.client import (
+    AmazonAdsAPIError,
+    AmazonAdsClient,
+    ReportTooLargeError,
+    check_api_path,
+)
 
 from .conftest import BASE, CLIENT_ID, PROFILE, FakeAuth, audit_entries
 
@@ -59,6 +65,34 @@ def test_missing_profile_is_a_clear_error(client: AmazonAdsClient) -> None:
 def test_absolute_urls_are_rejected(client: AmazonAdsClient) -> None:
     with pytest.raises(ValueError, match="relative"):
         client.request("GET", "https://example.com/steal")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "//evil.example.com/x",
+        "/sp/campaigns/../../v2/profiles",
+        "/sp/campaigns/%2e%2e/v2/profiles",
+        "/sp/campaigns/..%2F..%2Fv2",
+        "/sp/./campaigns",
+        "/sp/campaigns\\..\\x",
+        "/sp/campaigns%5c..",
+        "/sp/campaigns#frag",
+        "/sp/campaigns list",
+        "/sp/campaigns\n",
+        "v2/profiles",
+    ],
+)
+def test_unsafe_paths_are_rejected(path: str) -> None:
+    with pytest.raises(ValueError):
+        check_api_path(path)
+
+
+@pytest.mark.parametrize(
+    "path", ["/v2/profiles", "/sp/campaigns/list", "/sd/campaigns?stateFilter=enabled,paused"]
+)
+def test_normal_paths_are_allowed(path: str) -> None:
+    check_api_path(path)
 
 
 @respx.mock
@@ -206,3 +240,64 @@ def test_download_report_reads_gzip_in_memory(client: AmazonAdsClient) -> None:
 def test_download_report_refuses_other_hosts(client: AmazonAdsClient) -> None:
     with pytest.raises(ValueError, match="non-Amazon"):
         client.download_report("https://evil.example.com/r.json.gz")
+
+
+REPORT_URL = "https://offline-report-storage-eu-west-1-prod.s3.eu-west-1.amazonaws.com/r.json.gz"
+
+
+@respx.mock
+def test_download_report_refuses_files_over_the_cap(
+    client: AmazonAdsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_REPORT_BYTES", 1000)
+    respx.get(REPORT_URL).mock(return_value=httpx.Response(200, content=b"[" + b" " * 2000 + b"]"))
+    with pytest.raises(ReportTooLargeError, match="larger than"):
+        client.download_report(REPORT_URL)
+
+
+@respx.mock
+def test_download_report_refuses_large_declared_length(
+    client: AmazonAdsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_REPORT_BYTES", 1000)
+    respx.get(REPORT_URL).mock(
+        return_value=httpx.Response(200, headers={"Content-Length": "5000"}, content=b"[]")
+    )
+    with pytest.raises(ReportTooLargeError):
+        client.download_report(REPORT_URL)
+
+
+@respx.mock
+def test_download_report_refuses_gzip_that_expands_past_the_cap(
+    client: AmazonAdsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_REPORT_BYTES", 10_000)
+    bomb = gzip.compress(b"[" + b" " * 1_000_000 + b"]")
+    assert len(bomb) < 10_000
+    respx.get(REPORT_URL).mock(return_value=httpx.Response(200, content=bomb))
+    with pytest.raises(ReportTooLargeError):
+        client.download_report(REPORT_URL)
+
+
+@respx.mock
+def test_download_report_reads_plain_json_and_multi_member_gzip(client: AmazonAdsClient) -> None:
+    route = respx.get(REPORT_URL).mock(
+        side_effect=[
+            httpx.Response(200, content=json.dumps([{"a": 1}]).encode()),
+            httpx.Response(200, content=gzip.compress(b'[{"a": ') + gzip.compress(b"2}]")),
+        ]
+    )
+    assert client.download_report(REPORT_URL) == [{"a": 1}]
+    assert client.download_report(REPORT_URL) == [{"a": 2}]
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_download_report_retries_then_reports_errors(client: AmazonAdsClient) -> None:
+    respx.get(REPORT_URL).mock(
+        side_effect=[httpx.Response(503), httpx.Response(403, content=b"AccessDenied")]
+    )
+    with pytest.raises(AmazonAdsAPIError) as ei:
+        client.download_report(REPORT_URL)
+    assert ei.value.status == 403
+    assert "AccessDenied" in str(ei.value)

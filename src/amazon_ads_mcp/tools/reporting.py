@@ -15,6 +15,7 @@ from typing import Any
 from mcp.server.mcpserver import Context
 
 from ..client import AmazonAdsAPIError, AmazonAdsClient
+from ._common import path_id
 from ._progress import report, run_blocking
 
 CREATE_MEDIA = "application/vnd.createasyncreportrequest.v3+json"
@@ -111,7 +112,7 @@ def register(mcp, client: AmazonAdsClient) -> None:
     def get(report_id: str, profile_id: str | None) -> dict[str, Any]:
         return client.request(
             "GET",
-            f"/reporting/reports/{report_id}",
+            f"/reporting/reports/{path_id(report_id, 'report_id')}",
             profile_id=profile_id,
             accept=GET_MEDIA,
         )

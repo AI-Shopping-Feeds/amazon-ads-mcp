@@ -16,6 +16,7 @@ safety guards, before-snapshots and audit trail for every entity.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +24,7 @@ from typing import Any
 from mcp.server.mcpserver import Context
 
 from .. import safety
+from ..auth import redact
 from ..client import AmazonAdsClient
 from ._progress import report, run_blocking
 
@@ -30,6 +32,23 @@ MAX_BATCH = 1000
 # How many entities to scan when an endpoint can't filter by ID.
 ID_SCAN_LIMIT = 5000
 ALL_STATES = "ALL"
+
+
+_PATH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
+
+
+def path_id(value: Any, name: str) -> str:
+    """Check an ID that is put into a URL path, so it can't change the endpoint.
+
+    Amazon Ads IDs are numbers or UUID-like strings; anything with '/', '..',
+    '?' or other punctuation is refused.
+    """
+    text = str(value).strip()
+    if not _PATH_ID.fullmatch(text) or ".." in text:
+        raise ValueError(
+            f"{name} must be an ID made of letters, digits, '-', '_' or '.'; got {text[:40]!r}."
+        )
+    return text
 
 
 def ids_to_strings(ids: Sequence[Any] | None) -> list[str]:
@@ -528,7 +547,7 @@ def register_rest_style(mcp, client: AmazonAdsClient, spec: RestStyleEntity) -> 
             confirm: str = "",
             ctx: Context | None = None,
         ) -> dict[str, Any]:
-            id_list = ids_to_strings(ids)
+            id_list = [path_id(i, "ids[]") for i in ids_to_strings(ids)]
             if not id_list:
                 raise ValueError("Pass at least one ID.")
             if len(id_list) > 100:
@@ -564,7 +583,7 @@ def register_rest_style(mcp, client: AmazonAdsClient, spec: RestStyleEntity) -> 
                     results.append(out)
                     await report(ctx, done, total, f"Archived {eid} ({done} of {total})")
                 except Exception as e:
-                    failed.append({"id": eid, "reason": str(e)[:300]})
+                    failed.append({"id": eid, "reason": redact(str(e))[:300]})
                     await report(ctx, done, total, f"Failed {eid} ({done} of {total})")
             return safety.annotate(
                 {

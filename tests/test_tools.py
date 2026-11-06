@@ -300,3 +300,62 @@ async def test_v1_delete_needs_delete_confirm(config: Config) -> None:
         )
     )
     assert json.loads(route.calls.last.request.content) == {"campaignIds": ["1"]}
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("amazon_ads_sp_get_budget_rule", {"budget_rule_id": "../../v2/profiles"}),
+        ("amazon_ads_sp_list_campaign_budget_rules", {"campaign_id": "1/budgetRules/x"}),
+        (
+            "amazon_ads_sp_detach_budget_rule",
+            {"campaign_id": "1", "budget_rule_id": "a?x=1"},
+        ),
+        ("amazon_ads_get_report", {"report_id": "../sp/campaigns"}),
+        ("amazon_ads_sd_archive_campaigns", {"ids": ["1/../2"], "confirm": "ARCHIVE"}),
+    ],
+)
+@respx.mock(assert_all_mocked=True)
+async def test_ids_in_paths_are_checked(config: Config, tool: str, args: dict[str, Any]) -> None:
+    result = await _call(config, tool, args)
+    assert result.is_error
+    assert "must be an ID" in result.content[0].text
+    assert not respx.calls
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/sp/campaigns/recommendations/apply",
+        "/sp/targets/bid/recommendations/accept",
+        "/adsApi/v1/update/campaigns/list",
+        "/sp/campaigns/delete/list",
+    ],
+)
+@respx.mock(assert_all_mocked=True)
+async def test_read_request_refuses_action_paths(config: Config, path: str) -> None:
+    result = await _call(config, "amazon_ads_read_request", {"method": "POST", "path": path})
+    assert result.is_error
+    assert "amazon_ads_request" in result.content[0].text
+    assert not respx.calls
+
+
+@respx.mock
+async def test_read_request_still_allows_report_requests(config: Config) -> None:
+    respx.post(f"{BASE}/adsApi/v1/create/reports").mock(
+        return_value=httpx.Response(200, json={"reportId": "r1"})
+    )
+    out = _payload(
+        await _call(
+            config,
+            "amazon_ads_read_request",
+            {"method": "POST", "path": "/adsApi/v1/create/reports", "body": {}},
+        )
+    )
+    assert out == {"reportId": "r1"}
+
+
+async def test_read_request_rejects_dot_segments(config: Config) -> None:
+    for path in ("/sp/campaigns/%2e%2e/v2/profiles", "/sp/campaigns/..%2fx", "//evil.example/x"):
+        result = await _call(config, "amazon_ads_read_request", {"method": "GET", "path": path})
+        assert result.is_error, path

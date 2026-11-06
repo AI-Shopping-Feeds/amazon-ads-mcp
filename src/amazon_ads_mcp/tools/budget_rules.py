@@ -6,7 +6,7 @@ from typing import Any
 
 from .. import safety
 from ..client import AmazonAdsClient
-from ._common import check_items, ids_to_strings
+from ._common import check_items, ids_to_strings, path_id
 
 
 def _rules_decision(client: AmazonAdsClient, count: int) -> safety.Decision:
@@ -32,16 +32,16 @@ def register(mcp, client: AmazonAdsClient) -> None:
         budget_rule_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Get one Sponsored Products budget rule."""
-        return client.request("GET", f"/sp/budgetRules/{budget_rule_id}", profile_id=profile_id)
+        rule_id = path_id(budget_rule_id, "budget_rule_id")
+        return client.request("GET", f"/sp/budgetRules/{rule_id}", profile_id=profile_id)
 
     @mcp.tool()
     def amazon_ads_sp_list_campaign_budget_rules(
         campaign_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """List the budget rules attached to one Sponsored Products campaign."""
-        return client.request(
-            "GET", f"/sp/campaigns/{campaign_id}/budgetRules", profile_id=profile_id
-        )
+        cid = path_id(campaign_id, "campaign_id")
+        return client.request("GET", f"/sp/campaigns/{cid}/budgetRules", profile_id=profile_id)
 
     @mcp.tool()
     def amazon_ads_sp_create_budget_rules(
@@ -79,11 +79,10 @@ def register(mcp, client: AmazonAdsClient) -> None:
         missing = [i for i, r in enumerate(rules) if not r.get("ruleId")]
         if missing:
             raise ValueError(f"Every rule needs ruleId; missing at index {missing}.")
+        rule_ids = [path_id(r["ruleId"], "ruleId") for r in rules]
         before = [
-            client.snapshot(
-                client.request, "GET", f"/sp/budgetRules/{r['ruleId']}", profile_id=profile_id
-            )
-            for r in rules
+            client.snapshot(client.request, "GET", f"/sp/budgetRules/{rid}", profile_id=profile_id)
+            for rid in rule_ids
         ]
         decision = _rules_decision(client, len(rules))
         body = {"budgetRulesDetails": rules}
@@ -108,6 +107,7 @@ def register(mcp, client: AmazonAdsClient) -> None:
         confirm: str = "",
     ) -> dict[str, Any]:
         """Attach budget rules to a Sponsored Products campaign. Needs confirm='APPLY'."""
+        cid = path_id(campaign_id, "campaign_id")
         ids = ids_to_strings(budget_rule_ids)
         if not ids:
             raise ValueError("Pass at least one budget rule ID.")
@@ -118,7 +118,7 @@ def register(mcp, client: AmazonAdsClient) -> None:
             return refused
         out = client.request(
             "POST",
-            f"/sp/campaigns/{campaign_id}/budgetRules",
+            f"/sp/campaigns/{cid}/budgetRules",
             json_body=body,
             profile_id=profile_id,
             op="sp_attach_budget_rules",
@@ -130,15 +130,17 @@ def register(mcp, client: AmazonAdsClient) -> None:
         campaign_id: str, budget_rule_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Detach a budget rule from a Sponsored Products campaign (the rule itself is kept)."""
+        cid = path_id(campaign_id, "campaign_id")
+        rule_id = path_id(budget_rule_id, "budget_rule_id")
         before = client.snapshot(
             client.request,
             "GET",
-            f"/sp/campaigns/{campaign_id}/budgetRules",
+            f"/sp/campaigns/{cid}/budgetRules",
             profile_id=profile_id,
         )
         return client.request(
             "DELETE",
-            f"/sp/campaigns/{campaign_id}/budgetRules/{budget_rule_id}",
+            f"/sp/campaigns/{cid}/budgetRules/{rule_id}",
             profile_id=profile_id,
             op="sp_detach_budget_rule",
             before=before,
