@@ -171,7 +171,9 @@ Sponsored Display campaigns, ad groups, product ads, targets and negative target
 
 ## reporting (4)
 
-Asynchronous performance reports (reporting v3). Rows stay in memory.
+Asynchronous performance reports (reporting v3). Rows stay in memory and are never
+written to disk; report files over 200 MB are refused, so narrow the date range,
+columns or `group_by` for very large accounts.
 
 | Tool | What it does | Kind |
 |---|---|---|
@@ -208,6 +210,13 @@ Sponsored Products budget rules.
 
 The unified Amazon Ads API v1 (campaigns, ad groups, ads, targets, ad associations across ad products).
 
+Amazon recommends v1 for new integrations, and its campaign-management endpoints are
+generally available. This server keeps the per-product tools as its main surface,
+because their fields are well established and the safety guards can compare bids and
+budgets against current values, and adds these four generic tools for the unified model.
+Reporting, recommendations and rules are still moving into v1, so the server uses the
+established endpoints for those.
+
 | Tool | What it does | Kind |
 |---|---|---|
 | `amazon_ads_v1_query` | Query entities (Ads API v1) | read |
@@ -217,7 +226,17 @@ The unified Amazon Ads API v1 (campaigns, ad groups, ads, targets, ad associatio
 
 ## request (2)
 
-Escape hatch for any endpoint the other tools don't cover.
+Escape hatch for any endpoint the other tools don't cover. Paths are relative to your
+regional API host; other hosts, `..` segments and encoded tricks are refused.
+`amazon_ads_read_request` only allows GET and POSTs to list, query, search,
+recommendation and report endpoints, and treats any path with an action segment
+(`apply`, `update`, `delete` and so on) as a write. Every write through
+`amazon_ads_request` needs `confirm="APPLY"`.
+
+Left to the escape hatch: Amazon DSP, Sponsored Television, Amazon Marketing Cloud,
+Stores and creative asset uploads, Sponsored Brands and Display creatives and
+moderation, brand safety lists, optimization rules, forecasts, insights, product and
+category targeting helpers, test accounts, and Ads API v1 reporting.
 
 | Tool | What it does | Kind |
 |---|---|---|
@@ -226,4 +245,15 @@ Escape hatch for any endpoint the other tools don't cover.
 
 ## CLI
 
-`amazon-ads-mcp run` (default), `auth`, `purge`, `describe`, `version`.
+| Command | What it does |
+|---|---|
+| `amazon-ads-mcp run` | Start the server (the default) |
+| `amazon-ads-mcp auth` | One-time Login with Amazon consent; saves the refresh token. `--manual` to paste the redirect address instead of using the local callback |
+| `amazon-ads-mcp describe` | Print the effective settings and paths, without secrets |
+| `amazon-ads-mcp purge` | Delete the audit log and the stored refresh token (`--keep-token` keeps the token) |
+| `amazon-ads-mcp version` | Print the version |
+
+Options go before the command: `--env /abs/path/file.env` reads that file instead of
+`./.env` (`~/.amazon-ads-mcp/.env` is always read last), and `--transport`, `--host`,
+`--port` and `--allow-remote` (needed for a non-loopback HTTP host) override the
+transport settings, e.g. `amazon-ads-mcp --transport streamable-http --port 8000`.
