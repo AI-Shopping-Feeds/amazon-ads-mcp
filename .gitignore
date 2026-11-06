@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- AI Shopping Feeds: credentials, local config and tool output ---
+# Never commit Login with Amazon credentials or refresh tokens.
+.env
+.env.*
+!.env.example
+secrets/
+*token*.json
+# Audit logs written by the server (may contain Amazon Ads data)
+logs/
+*.jsonl
+*.jsonl.tmp
+# Report exports, if you save any by hand
+reports/
+*.json.gz
+# Tool caches, build output and OS files
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+dist/
+build/
+.DS_Store
