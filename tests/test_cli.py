@@ -35,6 +35,7 @@ def base_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AMAZON_ADS_PORT",
         "AMAZON_ADS_TOOL_GROUPS",
         "AMAZON_ADS_REGION",
+        "AMAZON_ADS_ALLOW_REMOTE",
     ):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
@@ -47,11 +48,14 @@ def fake_run(base_env: Path, monkeypatch: pytest.MonkeyPatch):
     warnings: list[str] = []
     monkeypatch.setattr(cli.logger, "warning", lambda msg, *args: warnings.append(msg % args))
 
-    def invoke(*args: str):
+    def invoke(*args: str, ok: bool = True):
         env_file = str(base_env / "missing.env")
         result = CliRunner().invoke(cli.cli, ["--env", env_file, *args, "run"], obj={})
-        assert result.exit_code == 0, result.output
-        return server.calls, warnings
+        if ok:
+            assert result.exit_code == 0, result.output
+            return server.calls, warnings
+        assert result.exit_code != 0
+        return result.output, server.calls
 
     return invoke
 
@@ -67,9 +71,41 @@ def test_streamable_http_gets_host_and_port(fake_run) -> None:
     assert calls == [("streamable-http", {"host": "127.0.0.1", "port": 9123})]
 
 
-def test_non_loopback_host_warns(fake_run) -> None:
-    _, warnings = fake_run("--transport", "streamable-http", "--host", "0.0.0.0")
+def test_non_loopback_host_is_refused(fake_run) -> None:
+    output, calls = fake_run("--transport", "streamable-http", "--host", "0.0.0.0", ok=False)
+    assert "AMAZON_ADS_ALLOW_REMOTE" in output
+    assert "--allow-remote" in output
+    assert calls == []
+    output, calls = fake_run("--transport", "sse", "--host", "192.168.1.20", ok=False)
+    assert "Refusing" in output
+    assert calls == []
+
+
+def test_allow_remote_flag_binds_and_warns(fake_run) -> None:
+    calls, warnings = fake_run(
+        "--transport", "streamable-http", "--host", "0.0.0.0", "--allow-remote"
+    )
+    assert calls == [("streamable-http", {"host": "0.0.0.0", "port": 8000})]
     assert any("no authentication" in w for w in warnings)
+
+
+def test_allow_remote_env_var(fake_run, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AMAZON_ADS_ALLOW_REMOTE", "true")
+    calls, warnings = fake_run("--transport", "streamable-http", "--host", "10.0.0.5")
+    assert calls[0][1]["host"] == "10.0.0.5"
+    assert any("no authentication" in w for w in warnings)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "localhost", "::1", "[::1]"])
+def test_loopback_hosts_need_no_opt_in(fake_run, host: str) -> None:
+    calls, warnings = fake_run("--transport", "streamable-http", "--host", host)
+    assert calls[0][1]["host"] == host
+    assert warnings == []
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "", "::", "example.com", "192.168.0.1"])
+def test_is_loopback_rejects_other_hosts(host: str) -> None:
+    assert not cli.is_loopback(host)
 
 
 def test_authorization_url_uses_regional_consent_page() -> None:
@@ -96,6 +132,41 @@ def test_parse_redirect() -> None:
         cli.parse_redirect("https://amazon.com/?code=ABC&state=other", "st")
     with pytest.raises(click.ClickException, match="error"):
         cli.parse_redirect("https://amazon.com/?error=access_denied&state=st&code=", "st")
+    with pytest.raises(click.ClickException, match="error"):
+        cli.parse_redirect("https://amazon.com/?error=access_denied", "st")
+    with pytest.raises(click.ClickException, match="No code"):
+        cli.parse_redirect("   ", "st")
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "https://amazon.com/?code=ABC&scope=x",
+        "https://amazon.com/?code=ABC&state=",
+        "code=ABC&scope=advertising",
+    ],
+)
+def test_parse_redirect_requires_state_in_a_pasted_url(pasted: str) -> None:
+    with pytest.raises(click.ClickException, match="state"):
+        cli.parse_redirect(pasted, "st")
+
+
+def test_auth_manual_flow_refuses_redirect_without_state(
+    base_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.secrets, "token_urlsafe", lambda n: "fixedstate")
+    exchanged: list[Any] = []
+    monkeypatch.setattr(cli, "exchange_code", lambda **kw: exchanged.append(kw))
+    result = CliRunner().invoke(
+        cli.cli,
+        ["--env", str(base_env / "missing.env"), "auth", "--manual", "--no-browser"],
+        input="https://amazon.com/?code=THECODE\n",
+        obj={},
+    )
+    assert result.exit_code != 0
+    assert "state" in result.output
+    assert exchanged == []
+    assert not (base_env / "secrets" / "token.json").exists()
 
 
 def test_auth_manual_flow_saves_token_without_printing_it(
@@ -149,6 +220,36 @@ def test_describe_hides_secrets(base_env: Path) -> None:
     assert "cli-secret-value" not in result.output
     assert "cli-refresh" not in result.output
     assert json.loads(result.output)["refresh_token"] == "set"
+
+
+def test_default_paths_are_per_user(
+    base_env: Path, monkeypatch: pytest.MonkeyPatch, _isolated_home: Path
+) -> None:
+    monkeypatch.delenv("AMAZON_ADS_AUDIT_LOG")
+    monkeypatch.delenv("AMAZON_ADS_TOKEN_FILE")
+    result = CliRunner().invoke(
+        cli.cli, ["--env", str(base_env / "missing.env"), "describe"], obj={}
+    )
+    assert result.exit_code == 0, result.output
+    info = json.loads(result.output)
+    app = _isolated_home / ".amazon-ads-mcp"
+    assert Path(info["token_file"]) == (app / "secrets" / "amazon-ads-token.json").resolve()
+    assert Path(info["audit_log"]) == (app / "logs" / "audit.jsonl").resolve()
+    assert info["allow_remote"] is False
+
+
+def test_home_env_file_is_read(
+    base_env: Path, monkeypatch: pytest.MonkeyPatch, _isolated_home: Path
+) -> None:
+    monkeypatch.delenv("AMAZON_ADS_CLIENT_ID")
+    app = _isolated_home / ".amazon-ads-mcp"
+    app.mkdir()
+    (app / ".env").write_text("AMAZON_ADS_CLIENT_ID=amzn1.application-oa2-client.fromhome\n")
+    result = CliRunner().invoke(
+        cli.cli, ["--env", str(base_env / "missing.env"), "describe"], obj={}
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["client_id"] == "...omhome"
 
 
 def test_unknown_transport_is_rejected() -> None:

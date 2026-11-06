@@ -11,6 +11,7 @@ Subcommands:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import sys
@@ -24,17 +25,32 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import click
-from dotenv import load_dotenv
 
 from . import __version__
 from ._logging import configure_default, get_logger
 from .auth import SCOPE, exchange_code, redact, register_secret, save_token_file
-from .config import REGIONS, TRANSPORTS, audit_log_path, load_config, token_file_path
+from .config import (
+    REGIONS,
+    TRANSPORTS,
+    audit_log_path,
+    load_config,
+    load_env_files,
+    token_file_path,
+)
 from .server import build_server
 
 logger = get_logger("cli")
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+def is_loopback(host: str) -> bool:
+    """True for localhost and loopback addresses (127.0.0.0/8, ::1)."""
+    host = host.strip().strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @click.group(invoke_without_command=True)
@@ -42,7 +58,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
     "--env",
     "env_file",
     type=click.Path(dir_okay=False, path_type=Path),
-    help="Path to a .env file. Defaults to ./.env.",
+    help="Path to a .env file. Defaults to ./.env; ~/.amazon-ads-mcp/.env is also read.",
 )
 @click.option(
     "--transport",
@@ -56,6 +72,14 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 @click.option(
     "--port", type=int, default=None, help="Bind port for streamable-http / sse (default 8000)."
 )
+@click.option(
+    "--allow-remote",
+    is_flag=True,
+    default=False,
+    help="Allow an HTTP transport to bind to a non-loopback address (same as "
+    "AMAZON_ADS_ALLOW_REMOTE=true). The server has no sign-in: only do this behind "
+    "an authenticating proxy.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -63,6 +87,7 @@ def cli(
     transport: str | None,
     host: str | None,
     port: int | None,
+    allow_remote: bool,
 ) -> None:
     """Amazon Ads MCP server."""
     ctx.ensure_object(dict)
@@ -70,6 +95,7 @@ def cli(
     ctx.obj["transport"] = transport
     ctx.obj["host"] = host
     ctx.obj["port"] = port
+    ctx.obj["allow_remote"] = allow_remote
     if ctx.invoked_subcommand is None:
         ctx.invoke(run)
 
@@ -86,15 +112,25 @@ def run(ctx: click.Context) -> None:
         config.host = ctx.obj["host"]
     if ctx.obj.get("port"):
         config.port = ctx.obj["port"]
+    if ctx.obj.get("allow_remote"):
+        config.allow_remote = True
 
-    mcp = build_server(config=config)
-
-    if config.transport != "stdio" and config.host not in _LOOPBACK_HOSTS:
+    if config.transport != "stdio" and not is_loopback(config.host):
+        if not config.allow_remote:
+            raise click.ClickException(
+                f"Refusing to serve on {config.host!r}: the HTTP transport has no sign-in, so "
+                "anyone who can reach that address could change your ads and spend your "
+                "budget. Use 127.0.0.1, or put the server behind an authenticating proxy and "
+                "set AMAZON_ADS_ALLOW_REMOTE=true (or pass --allow-remote)."
+            )
         logger.warning(
             "binding to %s: the server has no authentication, so anyone who can reach "
             "this address can use your Amazon Ads credentials",
             config.host,
         )
+
+    mcp = build_server(config=config)
+
     if config.transport == "stdio":
         mcp.run("stdio")
     elif config.transport == "streamable-http":
@@ -124,9 +160,14 @@ def authorization_url(*, region: str, client_id: str, redirect_uri: str, state: 
 
 
 def parse_redirect(value: str, expected_state: str) -> str:
-    """Pull the authorization code out of a pasted redirect URL (or a bare code)."""
+    """Pull the authorization code out of a pasted redirect URL (or a bare code).
+
+    A pasted URL must carry the same `state` this run sent to Amazon, so a
+    redirect from another sign-in (or a crafted link) can't be swapped in. A
+    bare code is still accepted.
+    """
     value = value.strip()
-    if "code=" not in value:
+    if "code=" not in value and "error=" not in value:
         if not value:
             raise click.ClickException("No code given.")
         return value
@@ -134,7 +175,12 @@ def parse_redirect(value: str, expected_state: str) -> str:
     if "error" in query:
         raise click.ClickException(f"Amazon returned an error: {query['error'][0]}")
     state = query.get("state", [None])[0]
-    if state is not None and state != expected_state:
+    if state is None:
+        raise click.ClickException(
+            "The redirect has no state, so it can't be checked; paste the full address "
+            "from this sign-in, or start again."
+        )
+    if not secrets.compare_digest(state, expected_state):
         raise click.ClickException("The state in the redirect doesn't match; start again.")
     code = query.get("code", [""])[0]
     if not code:
@@ -215,7 +261,7 @@ def _wait_for_code(port: int, expected_state: str, timeout: float) -> str:
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Where to save the refresh token (default AMAZON_ADS_TOKEN_FILE or "
-    "secrets/amazon-ads-token.json in this checkout).",
+    "~/.amazon-ads-mcp/secrets/amazon-ads-token.json).",
 )
 @click.option("--no-browser", is_flag=True, help="Print the consent URL instead of opening it.")
 @click.option(
@@ -306,11 +352,7 @@ def auth(
 @click.pass_context
 def purge(ctx: click.Context, yes: bool, keep_token: bool) -> None:
     """Delete locally stored Amazon Ads data: the audit log and the refresh-token file."""
-    env_file = ctx.obj.get("env_file")
-    if env_file is not None:
-        load_dotenv(dotenv_path=env_file, override=False)
-    else:
-        load_dotenv(override=False)
+    load_env_files(ctx.obj.get("env_file"))
     audit = audit_log_path()
     targets = [audit, audit.with_suffix(audit.suffix + ".tmp")]
     if not keep_token:
@@ -365,6 +407,7 @@ def describe(ctx: click.Context) -> None:
         "transport": config.transport,
         "host": config.host,
         "port": config.port,
+        "allow_remote": config.allow_remote,
     }
     click.echo(json.dumps(info, indent=2, ensure_ascii=False))
 
