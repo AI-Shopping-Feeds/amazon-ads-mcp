@@ -1,6 +1,7 @@
 ---
 name: amazon-ads-mcp
-description: Set up and use the Amazon Ads MCP server (Amazon Ads API, read + write, self-hosted). Use when the person wants to connect their Amazon Ads account to their agent, or to report on, audit or change Sponsored Products, Sponsored Brands or Sponsored Display campaigns, keywords, targets, bids, budgets, portfolios or budget rules.
+description: Set up and use the Amazon Ads MCP server (Amazon Ads API, read + write, runs locally). Use when the person wants to connect their Amazon Ads account to their agent, or to report on, audit or change Sponsored Products, Sponsored Brands or Sponsored Display campaigns, keywords, targets, bids, budgets, portfolios or budget rules.
+license: MIT
 metadata:
   homepage: https://github.com/AI-Shopping-Feeds/amazon-ads-mcp
 ---
@@ -17,13 +18,15 @@ Amazon Ads API:
 - portfolios and budget rules
 - the unified Ads API v1, and a raw request tool for anything else
 
-Every write is recorded in an audit log, can be rehearsed with dry-run, and
-risky writes need a confirm word.
+It changes live ads and spends real money. Every write is recorded in an audit
+log, can be rehearsed with dry-run, and risky writes need a confirm word.
 
 This file has two parts: **Set up** connects the server to the person's agent,
 and **Work with the tools** explains how to use it well.
 
 ## Set up
+
+Follow these steps when the person asks you to set up or connect Amazon Ads.
 
 ### 1. Check whether it is already connected
 
@@ -31,85 +34,131 @@ If you can already see tools such as `amazon_ads_describe_server`, call it and
 then `amazon_ads_health_check`. If both succeed and list the right profiles,
 setup is done: skip to **Work with the tools**.
 
-### 2. Make sure they have API access
+### 2. Install the runner
 
-The person needs an approved Amazon Ads API client. If they don't have one,
-walk them through README.md steps 1–3:
+The server runs on this computer with `uvx` (from [uv](https://docs.astral.sh/uv/))
+or `pipx`, and needs Python 3.11 or later. If neither is installed, ask the
+person before installing uv (`brew install uv` on macOS, or see
+https://docs.astral.sh/uv/getting-started/installation/). The server command is:
 
-1. Create a Login with Amazon security profile at developer.amazon.com and
-   note its client ID and client secret. Add `http://localhost:8765/callback`
-   to its Allowed Return URLs.
-2. Apply for Amazon Ads API access (Direct Advertiser, or Partner for agencies)
-   with the same email. Approval can take up to one business day.
-3. When approved, sign out of other Amazon accounts and use the email's link to
-   assign API access to the security profile.
+```shell
+uvx --from git+https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git amazon-ads-mcp
+```
+
+### 3. Get credentials
+
+Ask what the person already has. The full walkthrough is
+[docs/setup-amazon-ads-api.md](https://github.com/AI-Shopping-Feeds/amazon-ads-mcp/blob/main/docs/setup-amazon-ads-api.md).
+They need:
+
+- **A Login with Amazon security profile** (developer.amazon.com → Login with
+  Amazon), with its client ID and client secret, and
+  `http://localhost:8765/callback` in its Allowed Return URLs.
+- **Amazon Ads API access**, applied for with the same email (Direct
+  Advertiser, or Partner for agencies and tool makers). Approval can take up to
+  one business day. When it's approved, they sign out of other Amazon accounts
+  and use the email's link to assign API access to the security profile.
+- **A `.env` file** at `~/.amazon-ads-mcp/.env` (`%USERPROFILE%\.amazon-ads-mcp\.env`
+  on Windows), which the person creates with a text editor and makes owner-only
+  (`chmod 700 ~/.amazon-ads-mcp && chmod 600 ~/.amazon-ads-mcp/.env`):
+  ```text
+  AMAZON_ADS_CLIENT_ID=amzn1.application-oa2-client.THEIR_CLIENT_ID
+  AMAZON_ADS_CLIENT_SECRET=THEIR_CLIENT_SECRET
+  AMAZON_ADS_REGION=EU
+  AMAZON_ADS_DRY_RUN=true
+  ```
+  `AMAZON_ADS_REGION` is `EU` for the UK and Europe, `NA` for the Americas and
+  `FE` for Japan, Australia and Singapore. Don't ask them to paste the secret
+  into chat, and don't write it yourself.
+- **A refresh token**, created by running this themselves in a terminal (it
+  opens a browser; they sign in with the Amazon user that manages the ads and
+  click Allow):
+  ```shell
+  uvx --from git+https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git amazon-ads-mcp auth
+  ```
+  It saves the token to `~/.amazon-ads-mcp/secrets/amazon-ads-token.json`
+  (owner-only). If the browser redirect fails, they add `--manual` and paste the
+  full address Amazon sends them to. Never print, copy or commit the token file.
+- **Optional `AMAZON_ADS_READ_ONLY=true`:** registers only read-only tools.
+  Suggest it when the person only wants reports and audits.
+- **Optional `AMAZON_ADS_TOOL_GROUPS`:** a comma-separated list of tool groups
+  (default all): `profiles`, `sp_campaigns`, `sp_ads`, `sp_targeting`,
+  `sp_recommendations`, `bulk`, `sponsored_brands`, `sponsored_display`,
+  `reporting`, `portfolios`, `budget_rules`, `ads_api_v1`, `request`. Fewer
+  tools means less context and better tool choice.
 
 The API is only for companies that don't run a significant ecommerce business,
 a DSP or an ad network, and only for ad accounts whose owners have authorised
 the person. Mention this if it might not apply.
 
-### 3. Install and connect
-
-This repository is private, so the person needs git access to it. With
-[uv](https://docs.astral.sh/uv/) installed (ask before installing it):
-
-```shell
-git clone https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git
-cd amazon-ads-mcp
-uv venv --python 3.12 && uv pip install -e .
-cp .env.example .env
-```
-
-Ask the person to put `AMAZON_ADS_CLIENT_ID`, `AMAZON_ADS_CLIENT_SECRET` and
-`AMAZON_ADS_REGION` (EU for the UK and Europe, NA for the Americas, FE for
-Japan, Australia and Singapore) into `.env` themselves. Don't ask them to paste
-the secret into chat.
-
-Then the person runs the one-time consent in their own terminal (it opens a
-browser):
-
-```shell
-.venv/bin/amazon-ads-mcp auth
-```
-
-It saves the refresh token to `secrets/amazon-ads-token.json` (owner-only,
-gitignored). Never print, copy or commit that file. Suggest `AMAZON_ADS_DRY_RUN=true`
-in `.env` to start, and `AMAZON_ADS_READ_ONLY=true` if they only want reports
-and audits.
+To check the settings without starting the server, the person can run the
+command above with `describe` instead of `auth`. It prints no secrets.
 
 ### 4. Add the server to the client
 
 Add to the existing config, and never remove the person's other MCP servers.
-Use absolute paths.
+The credentials and token are read from `~/.amazon-ads-mcp`, so the config
+holds no secrets.
 
 **Claude Code:**
 
 ```bash
 claude mcp add --scope user amazon-ads \
-  -- /abs/path/amazon-ads-mcp/.venv/bin/amazon-ads-mcp --env /abs/path/amazon-ads-mcp/.env run
+  --env AMAZON_ADS_DRY_RUN=true \
+  -- uvx --from git+https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git amazon-ads-mcp
 ```
 
-**Claude Desktop:** under `mcpServers` in `claude_desktop_config.json`, then
-ask the person to quit and reopen Claude:
+**Claude Desktop:** add this under `mcpServers` in `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`;
+Windows: `%APPDATA%\Claude\claude_desktop_config.json`), then ask the person to
+quit and reopen Claude. Desktop apps often can't see `uvx` on the PATH, so use
+its full path from `which uvx`.
 
 ```json
 "amazon-ads": {
-  "command": "/abs/path/amazon-ads-mcp/.venv/bin/amazon-ads-mcp",
-  "args": ["--env", "/abs/path/amazon-ads-mcp/.env", "run"]
+  "command": "/full/path/to/uvx",
+  "args": ["--from", "git+https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git", "amazon-ads-mcp"],
+  "env": {
+    "AMAZON_ADS_DRY_RUN": "true"
+  }
 }
 ```
 
+**Cursor:** add the same entry under `mcpServers` in `~/.cursor/mcp.json` (the
+user-level file, never a project's `.cursor/mcp.json`).
+
+**Codex:** add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.amazon-ads]
+command = "uvx"
+args = ["--from", "git+https://github.com/AI-Shopping-Feeds/amazon-ads-mcp.git", "amazon-ads-mcp"]
+env = { AMAZON_ADS_DRY_RUN = "true" }
+```
+
+**Any other client** that runs local servers: the command `uvx` with the
+arguments above.
+
+If the person keeps the `.env` file somewhere else, add `--env` and its
+absolute path after `amazon-ads-mcp` in the arguments. Never use the HTTP
+transport on anything but 127.0.0.1: it has no sign-in.
+
 ### 5. Check it works
 
-After a restart, call `amazon_ads_describe_server` and `amazon_ads_health_check`.
+Most clients load new servers only after a restart or reload. Ask the person to
+do that, then call `amazon_ads_describe_server` and `amazon_ads_health_check`.
 Tell the person the region, the profiles you can see, and whether dry-run is on.
-Suggest setting `AMAZON_ADS_PROFILE_ID` to the profile they use most.
+Suggest adding `AMAZON_ADS_PROFILE_ID` for the profile they use most to
+`~/.amazon-ads-mcp/.env`.
+
+If it fails, see **Troubleshooting** at the end.
 
 ## Work with the tools
 
 ### Tools (100)
 
-All tools start with `amazon_ads_`. If `AMAZON_ADS_TOOL_GROUPS` or
+All tools start with `amazon_ads_`. The full list is in
+[docs/tools.md](https://github.com/AI-Shopping-Feeds/amazon-ads-mcp/blob/main/docs/tools.md). If `AMAZON_ADS_TOOL_GROUPS` or
 `AMAZON_ADS_READ_ONLY` is set you see only some of them. Every API tool takes an
 optional `profile_id` (default `AMAZON_ADS_PROFILE_ID`).
 
@@ -186,7 +235,12 @@ then `sp_update_campaigns` with `{"campaignId": ..., "budget": {"budgetType":
 
 ## Troubleshooting
 
-- **"No refresh token configured":** run `amazon-ads-mcp auth`.
+- **"AMAZON_ADS_CLIENT_ID and AMAZON_ADS_CLIENT_SECRET must be set":** the
+  server can't find `~/.amazon-ads-mcp/.env` (or the `--env` file). Check the
+  path and the variable names.
+- **"No refresh token configured":** run the `auth` command in step 3.
+- **"The redirect has no state" during `auth --manual`:** paste the full
+  address from this sign-in (it includes `state=`), or run `auth` again.
 - **Token refresh refused / `invalid_grant`:** the refresh token was revoked or
   has expired (tokens from 30 July 2026 last 365 days). Run `auth` again.
 - **Health check lists no profiles:** wrong `AMAZON_ADS_REGION`, or the Amazon
@@ -197,3 +251,7 @@ then `sp_update_campaigns` with `{"campaignId": ..., "budget": {"budgetType":
   `amazon_ads_set_dry_run(enabled=false)`.
 - **415 or "unsupported media type" from a raw request:** pass the endpoint's
   versioned `content_type`; the error names it.
+- **"The report is larger than 200 MB":** request a shorter date range, fewer
+  columns or a coarser `group_by`.
+- **"Refusing to serve on ...":** the HTTP transport only listens on
+  127.0.0.1. Use stdio, or keep the default host.
