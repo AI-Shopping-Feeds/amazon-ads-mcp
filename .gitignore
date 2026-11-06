@@ -9,20 +9,29 @@ __pycache__/
 !.env.example
 secrets/
 *token*.json
+*.pem
+*.p8
+*.key
 # Audit logs written by the server (may contain Amazon Ads data)
 logs/
+*.log
 *.jsonl
 *.jsonl.tmp
 # Report exports, if you save any by hand
 reports/
 *.json.gz
-# Tool caches, build output and OS files
+# Tool caches, build output, editors and OS files
 .venv/
+.venv-*/
 venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
 .coverage
+.coverage.*
+htmlcov/
 dist/
 build/
+.idea/
+.vscode/
 .DS_Store

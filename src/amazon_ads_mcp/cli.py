@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -332,7 +332,7 @@ def auth(
             "refresh_token": refresh,
             "region": region,
             "client_id_suffix": config.client_id[-6:],
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         },
     )
     click.echo(f"Saved the refresh token to {target} (owner-only permissions).")
